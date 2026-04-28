@@ -1,0 +1,29 @@
+# Private config (contains lat/lon, worker URL, auth token)
+config.js
+
+# Wardrobe images (stored on-device, not in repo)
+wardrobe/
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars
+node_modules/
+package-lock.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
