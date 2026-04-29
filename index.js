@@ -1,16 +1,13 @@
 /**
  * Cloudflare Worker — Gemini Auto-Tag + Garment Isolation Proxy
- * 
- * POST /  (or POST /tag)
+ *
+ * POST /
  *   Body: { image: "<base64 or data-url>" }
  *   Returns: { category, colors, eventTypes, description, isolatedImage? }
  *
- * The worker sends TWO requests to Gemini in parallel:
- *   1. Text analysis  → structured tags (category, colors, events, description)
- *   2. Image editing  → isolated garment with transparent background
- *
- * If isolation fails (quota, model error, etc.), the tags still return —
- * isolatedImage will simply be null and the client saves full-photo-only.
+ * Tagging uses gemini-2.5-flash (text model).
+ * Isolation uses gemini-2.5-flash-image (image generation model).
+ * Both run in parallel. Isolation is best-effort.
  *
  * Deploy:
  *   wrangler deploy
@@ -48,35 +45,28 @@ export default {
         return jsonResponse({ error: 'GEMINI_API_KEY not configured' }, 500);
       }
 
-      // ── Parallel requests: tagging + isolation ──
-      var tagPromise = geminiTag(env.GEMINI_API_KEY, imageBase64);
-      var isoPromise = geminiIsolate(env.GEMINI_API_KEY, imageBase64);
-
-      // Wait for both — isolation is best-effort
-      var results = await Promise.allSettled([tagPromise, isoPromise]);
+      // Run tagging and isolation in parallel
+      var results = await Promise.allSettled([
+        geminiTag(env.GEMINI_API_KEY, imageBase64),
+        geminiIsolate(env.GEMINI_API_KEY, imageBase64)
+      ]);
 
       // 1. Tags (required)
       var tagResult = results[0];
-      if (tagResult.status === 'rejected' || tagResult.value.error) {
-        var errDetail = tagResult.status === 'rejected'
-          ? String(tagResult.reason)
-          : tagResult.value.detail || tagResult.value.error;
-        return jsonResponse(
-          { error: 'Gemini tagging failed', detail: errDetail },
-          502
-        );
+      if (tagResult.status === 'rejected') {
+        return jsonResponse({ error: 'Gemini tagging failed', detail: String(tagResult.reason) }, 502);
       }
       var tags = tagResult.value;
+      if (tags.error) {
+        return jsonResponse(tags, 502);
+      }
 
       // 2. Isolation (best-effort)
       var isoResult = results[1];
-      var isolatedImage = null;
-      if (isoResult.status === 'fulfilled' && isoResult.value && !isoResult.value.error) {
-        isolatedImage = isoResult.value;
+      tags.isolatedImage = null;
+      if (isoResult.status === 'fulfilled' && typeof isoResult.value === 'string') {
+        tags.isolatedImage = isoResult.value;
       }
-
-      // Merge
-      tags.isolatedImage = isolatedImage;
 
       return jsonResponse(tags);
     } catch (err) {
@@ -86,7 +76,7 @@ export default {
 };
 
 // ═══════════════════════════════════════════
-// Gemini: Auto-tag clothing
+// Tagging — gemini-2.5-flash (text)
 // ═══════════════════════════════════════════
 async function geminiTag(apiKey, imageBase64) {
   var prompt = [
@@ -102,7 +92,7 @@ async function geminiTag(apiKey, imageBase64) {
   ].join('\n');
 
   var geminiUrl =
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' +
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' +
     apiKey;
 
   var geminiBody = {
@@ -122,6 +112,7 @@ async function geminiTag(apiKey, imageBase64) {
     generationConfig: {
       temperature: 0.2,
       maxOutputTokens: 256,
+      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
@@ -138,16 +129,46 @@ async function geminiTag(apiKey, imageBase64) {
 
   var geminiData = await geminiRes.json();
 
-  // Extract text
+  // Extract text from response.
+  // gemini-2.5-flash may include thinking parts — skip those, find the JSON.
   var text = '';
   try {
-    text = geminiData.candidates[0].content.parts[0].text || '';
+    var parts = geminiData.candidates[0].content.parts;
+    for (var i = 0; i < parts.length; i++) {
+      // Skip thinking parts
+      if (parts[i].thought) continue;
+      // Look for a part containing JSON
+      if (parts[i].text && parts[i].text.indexOf('{') !== -1) {
+        text = parts[i].text;
+        break;
+      }
+    }
+    // Fallback: grab last non-thinking text part
+    if (!text) {
+      for (var j = parts.length - 1; j >= 0; j--) {
+        if (parts[j].text && !parts[j].thought) {
+          text = parts[j].text;
+          break;
+        }
+      }
+    }
   } catch (e) {
-    return { error: 'Unexpected Gemini response format', raw: geminiData };
+    return { error: 'Unexpected Gemini response format', raw: JSON.stringify(geminiData).substring(0, 500) };
   }
 
-  // Strip markdown fences
+  if (!text) {
+    return { error: 'No text in Gemini response', raw: JSON.stringify(geminiData).substring(0, 500) };
+  }
+
+  // Strip markdown fences if present
   text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+  // Extract JSON from text — find first { to last }
+  var jsonStart = text.indexOf('{');
+  var jsonEnd = text.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd > jsonStart) {
+    text = text.substring(jsonStart, jsonEnd + 1);
+  }
 
   var tags;
   try {
@@ -183,23 +204,17 @@ async function geminiTag(apiKey, imageBase64) {
 }
 
 // ═══════════════════════════════════════════
-// Gemini: Isolate garment (remove background)
+// Isolation — gemini-2.5-flash-image
+// Returns a data URL string on success, null on failure.
 // ═══════════════════════════════════════════
 async function geminiIsolate(apiKey, imageBase64) {
-  // Use Gemini 2.0 Flash with image generation enabled
-  // to produce a version with transparent/removed background.
-  // Falls back gracefully if this model variant isn't available.
-  
-  var prompt = [
-    'Remove the background from this clothing photo.',
-    'Keep ONLY the clothing item/garment with a clean transparent background.',
-    'Remove any person, skin, body parts — keep just the fabric/garment shape.',
-    'Output just the isolated garment as a PNG image with transparent background.',
-  ].join(' ');
+  var prompt =
+    'Edit this image: erase everything except the main clothing item. ' +
+    'Replace the background, person, skin, and body with a solid white background. ' +
+    'Keep the garment centered and intact. Output as a new image.';
 
-  // Try the image-generation-capable model
   var geminiUrl =
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp-image-generation:generateContent?key=' +
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=' +
     apiKey;
 
   var geminiBody = {
@@ -229,12 +244,10 @@ async function geminiIsolate(apiKey, imageBase64) {
       body: JSON.stringify(geminiBody),
     });
   } catch (e) {
-    // Network error — isolation fails silently
     return null;
   }
 
   if (!geminiRes.ok) {
-    // 429, 503, model not available, etc. — fail silently
     return null;
   }
 
@@ -245,18 +258,22 @@ async function geminiIsolate(apiKey, imageBase64) {
     return null;
   }
 
-  // Extract image from response
-  // Gemini image-gen returns parts array with potential text + inline_data
   try {
     var parts = data.candidates[0].content.parts;
     for (var i = 0; i < parts.length; i++) {
+      // Check camelCase (inlineData) — what the API actually returns
+      if (parts[i].inlineData && parts[i].inlineData.data) {
+        var mimeType = parts[i].inlineData.mimeType || 'image/png';
+        return 'data:' + mimeType + ';base64,' + parts[i].inlineData.data;
+      }
+      // Also check snake_case (inline_data) just in case
       if (parts[i].inline_data && parts[i].inline_data.data) {
-        var mimeType = parts[i].inline_data.mime_type || 'image/png';
-        return 'data:' + mimeType + ';base64,' + parts[i].inline_data.data;
+        var mimeType2 = parts[i].inline_data.mime_type || 'image/png';
+        return 'data:' + mimeType2 + ';base64,' + parts[i].inline_data.data;
       }
     }
   } catch (e) {
-    // Couldn't parse — isolation not available
+    // no image in response
   }
 
   return null;
