@@ -33,14 +33,13 @@ A smart mirror app that's a hybrid between the closet software in Clueless and a
 - Webcam live view for capturing photos
 - Take a photo
 - Gemini API (via Cloudflare Worker) auto-tags: category, colors, event type, item description
-- MediaPipe selfie segmentation isolates the garment (removes body/background → transparent PNG)
+- Cloudflare Worker also runs server-side garment isolation via Gemini image generation (removes body/background → transparent PNG). Both happen in parallel in a single request.
 - Saves both: full outfit photo + isolated garment PNG to wardrobe server
 - Isolated garments feed into the Outfit Builder for future paper-doll overlays
 
 ## Input System
-- **IR LED strip remote + webcam tracking:** The webcam analyzes frames for bright IR flashes. Point the remote at the webcam, press any button → camera sees the flash position → cursor appears → click fires. Works for switching screens and triggering capture.
-- **Bluetooth keyboard/mouse:** Backup for wardrobe browsing, precision work.
-- Single webcam handles IR tracking AND photos simultaneously from the same stream.
+- **Bluetooth keyboard/mouse:** Primary input for all screens — wardrobe browsing, capture trigger, precision work.
+- Touch overlay planned as a future upgrade path.
 
 ## Tech Stack
 - Single HTML file (vanilla JS, no framework)
@@ -48,8 +47,7 @@ A smart mirror app that's a hybrid between the closet software in Clueless and a
 - Static sunset background image
 - Open-Meteo for weather (free, no key)
 - BaZi engine for daily colors/guidance (client-side JS) — see bazi-engine.js
-- Cloudflare Worker proxying Gemini API for auto-tagging on capture
-- MediaPipe selfie segmentation (client-side, browser-based) for garment isolation
+- Cloudflare Worker proxying Gemini API for auto-tagging + server-side garment isolation on capture
 - wardrobe_server.py on localhost:3456 for full-quality image storage
 - config.js for lat/lon, server URL, worker URL (gitignored)
 
@@ -57,8 +55,7 @@ A smart mirror app that's a hybrid between the closet software in Clueless and a
 - Orange Pi Zero 3 (1.5GB LPDDR4)
 - Dell monitor (mini HDMI → HDMI → DVI)
 - USB webcam (UVC-compatible)
-- LED strip IR remote (23-key)
-- Bluetooth keyboard/mouse (backup)
+- Bluetooth keyboard/mouse
 
 ## Files Being Carried Over
 - **bazi-engine.js** — standalone BaZi calculation module with Emily's natal chart, day pillar calculator, color data, guidance generators, and "what to wear" recommendations
@@ -85,9 +82,9 @@ A smart mirror app that's a hybrid between the closet software in Clueless and a
 ## What Needs To Be Built New
 2. Closet browser (full-screen, big tiles, filters)
 3. Outfit builder with paper-doll overlay on reference photo
-4. MediaPipe garment isolation pipeline
-5. Cloudflare Worker for Gemini auto-tagging
-6. IR flash tracking in browser JS
+4. ~~MediaPipe garment isolation pipeline~~ → Done: server-side via Cloudflare Worker
+5. ~~Cloudflare Worker for Gemini auto-tagging~~ → Done: tags + isolation in parallel
+6. ~~IR flash tracking in browser JS~~ → Removed (keyboard/mouse input only)
 7. New 4-screen navigation flow
 
 ## API Keys Needed

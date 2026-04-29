@@ -11,11 +11,10 @@ window.MIRROR_CONFIG = {
   // Wardrobe catalog server URL (runs on the Orange Pi)
   wardrobeServer: 'http://localhost:3456',
 
-  // Cloudflare Worker URL for Gemini auto-tagging (set after deploying worker)
-  // See HARDWARE-SETUP.md Step 5 for deployment instructions
-  aiWorkerUrl: '',
-
-  // Auth token for the Cloudflare Worker (must match MIRROR_AUTH_TOKEN secret)
-  // Generate one with: openssl rand -hex 16
-  aiAuthToken: '',
+  // Cloudflare Worker URL for Gemini auto-tagging + garment isolation
+  // Deploy the worker first:
+  //   wrangler deploy
+  //   wrangler secret put GEMINI_API_KEY
+  // Then paste the URL here:
+  aiWorkerUrl: 'https://mirror-gemini-tagger.<your-subdomain>.workers.dev',
 };
